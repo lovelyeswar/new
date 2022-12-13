@@ -1,0 +1,116 @@
+use role sysadmin;
+
+use role accountadmin;
+
+
+use database today_stg;
+use schema devine;
+
+create or replace storage integration today_int
+TYPE = EXTERNAL_STAGE
+STORAGE_PROVIDER = S3 ENABLED = TRUE
+STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::061646444552:role/TODAY_ROLE'
+STORAGE_ALLOWED_LOCATIONS = ('s3://eswar1-bucket/today/');
+
+DESCRIBE storage integration today_int;
+
+CREATE OR REPLACE STAGE TODAY_STAGE
+URL = 's3://eswar1-bucket/today/'
+STORAGE_INTEGRATION = today_int;
+
+CREATE FILE FORMAT "TODAY_STG"."DEVINE".TODAY_FORMAT TYPE = 'CSV' COMPRESSION = 'AUTO' FIELD_DELIMITER = ',' RECORD_DELIMITER = '\n' 
+SKIP_HEADER = 1 FIELD_OPTIONALLY_ENCLOSED_BY = 'NONE' TRIM_SPACE = TRUE ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE ESCAPE = 'NONE' 
+ESCAPE_UNENCLOSED_FIELD = '\134' DATE_FORMAT = 'AUTO' TIMESTAMP_FORMAT = 'AUTO' NULL_IF = ('\\N');
+
+CREATE PIPE "TODAY_STG"."DEVINE".TODAY_INT_PIPE AUTO_INGEST = TRUE 
+AS COPY INTO "TODAY_STG"."DEVINE"."DATA_INPUT" FROM @"TODAY_STG"."DEVINE"."TODAY_STAGE" 
+FILE_FORMAT = ( FORMAT_NAME = "TODAY_STG"."DEVINE"."TODAY_FORMAT");
+
+SELECT SYSTEM$PIPE_STATUS('TODAY_INT_PIPE');
+
+SELECT * FROM TABLE (INFORMATION_SCHEMA.COPY_HISTORY(TABLE_NAME=>'"TODAY_STG"."DEVINE"."DATA_INPUT"',START_TIME=>DATEADD(HOUR,-1,
+                                                                                                                        CURRENT_TIMESTAMP())));
+drop STREAM TODAY_STREAM;
+CREATE OR REPLACE STREAM TODAY_STREAM ON TABLE "TODAY_STG"."DEVINE"."DATA_INPUT" APPEND_ONLY = TRUE;
+
+SELECT SYSTEM$STREAM_HAS_DATA('TODAY_STREAM');
+
+CREATE OR REPLACE PROCEDURE TODAY_PRO()
+RETURNS STRING NOT NULL
+LANGUAGE JAVASCRIPT
+AS
+$$
+var stream_select_cmd = `
+INSERT INTO "TODAY"."DEVINE"."DATA_INPUT"
+SELECT
+E_ID::NUMBER(11),
+E_name::VARCHAR(100),
+E_location::VARCHAR(50),
+TO_DATE(DOJ, 'DD/MM/YYYY'),
+TO_DATE(DOR, 'DD/MM/YYYY'),
+Designation::VARCHAR(100)
+FROM
+TODAY_STREAM
+WHERE
+metadata$action = 'INSERT';`
+var sql_select_stream=snowflake.createStatement({sqlText:stream_select_cmd});
+var stream_select_results=sql_select_stream.execute();
+return 'Done';
+$$;
+
+
+CREATE OR REPLACE PROCEDURE TODAY_PRO()
+RETURNS STRING NOT NULL
+LANGUAGE JAVASCRIPT
+AS
+$$
+var stream_select_cmd = `
+MERGE INTO "TODAY"."DEVINE"."DATA_INPUT"
+USING TODAY_STREAM
+ON DATA_INPUT.E_ID = TODAY_STREAM.E_ID
+
+when matched then update set DATA_INPUT.E_ID = TODAY_STREAM.E_ID,
+DATA_INPUT.E_name = TODAY_STREAM.E_name,
+DATA_INPUT.E_location = TODAY_STREAM.E_location,
+DATA_INPUT.DOJ = TODAY_STREAM.DOJ,
+DATA_INPUT.DOR = TODAY_STREAM.DOR,
+DATA_INPUT.Designation = TODAY_STREAM.Designation 
+
+when not matched then insert (E_ID,
+E_name,
+E_location,
+DOJ,
+DOR,
+Designation)
+values (TODAY_STREAM.E_ID,TODAY_STREAM.E_name,TODAY_STREAM.E_location,TODAY_STREAM.DOJ,TODAY_STREAM.DOR,TODAY_STREAM.Designation)
+ `
+var sql_select_stream = snowflake.createStatement({sqlText:stream_select_cmd});
+var stream_select_results = sql_select_stream.execute();
+return 'Done';
+$$;
+
+
+CREATE OR REPLACE TASK TODAY_TASK
+WAREHOUSE = ESWAR_WH
+SCHEDULE = '1 MINUTE'
+WHEN SYSTEM$STREAM_HAS_DATA('TODAY_STREAM')
+AS
+CALL TODAY_PRO();
+
+
+ALTER TASK TODAY_TASK RESUME;
+ALTER TASK TODAY_TASK SUSPEND;
+SELECT * FROM TABLE (INFORMATION_SCHEMA.TASK_HISTORY(TASK_NAME=>'TODAY_TASK',SCHEDULED_TIME_RANGE_START=>DATEADD
+                                                    (HOUR,-1,CURRENT_TIMESTAMP())));
+ SELECT CURRENT_TIMESTAMP;                                                   
+SELECT SYSTEM$STREAM_HAS_DATA('TODAY_STREAM'); 
+
+SELECT * FROM TABLE (INFORMATION_SCHEMA.COPY_HISTORY(TABLE_NAME=>'"TODAY_STG"."DEVINE"."DATA_INPUT"',START_TIME=>DATEADD
+                                                     (HOUR,-1,CURRENT_TIMESTAMP())));
+                                                    
+ALTER ACCOUNT SET DATE_OUTPUT_FORMAT = "DD/MM/YYYY";
+TRUNCATE TABLE "TODAY_STG"."DEVINE"."DATA_INPUT";
+
+SELECT * FROM "TODAY"."DEVINE"."DATA_INPUT";
+
+

@@ -1,0 +1,81 @@
+create table company(
+use role sysadmin;
+use database eswar_stg;
+use schema dataloads;
+use warehouse eswar_wh;
+create table company(E_ID VARCHAR,E_NAME VARCHAR,E_LOCATION VARCHAR,DOJ VARCHAR,DOR VARCHAR,DESIGNATION VARCHAR);
+
+
+use role accountadmin;
+CREATE STORAGE INTEGRATION COMPANY_INT
+TYPE = EXTERNAL_STAGE
+STORAGE_PROVIDER = S3 enabled = true
+STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::487648248089:role/orders_role'
+STORAGE_ALLOWED_LOCATIONS =('s3://eswar-snowflake/ORDERS/');
+
+describe STORAGE INTEGRATION COMPANY_INT;
+
+create stage company_int_stage
+url ='s3://eswar-snowflake/ORDERS/'
+STORAGE_INTEGRATION = COMPANY_INT;
+
+show stages;
+
+
+list  @company_int_stage;
+
+create pipe company_int_pipe auto_ingest = true
+as
+copy into "ESWAR_STG"."DATALOADS"."COMPANY" from @"ESWAR_STG"."DATALOADS"."COMPANY_INT_STAGE"
+file_format =eswar_format;
+
+show pipes;
+
+select system$pipe_status('company_int_pipe');
+
+alter pipe company_int_pipe refresh;
+
+alter pipe company_int_pipe set pipe_execution_paused = true;
+
+alter pipe company_int_pipe set pipe_execution_paused = false;
+
+use database eswar;
+use schema dataloads;
+
+create table company(E_ID int,E_NAME VARCHAR,E_LOCATION VARCHAR,DOJ date,DOR date,DESIGNATION VARCHAR);
+
+use database eswar_stg;
+use schema dataloads;
+
+create or replace stream company_stream on table "ESWAR_STG"."DATALOADS"."COMPANY" append_only = true;
+
+create or replace procedure company_pro()
+returns string not null
+language javascript  
+as
+$$
+var stream_select_cmd =`
+insert into "ESWAR"."DATALOADS"."COMPANY"
+select
+E_ID::int,
+E_NAME::VARCHAR,
+E_LOCATION::VARCHAR,
+To_date(DOJ, 'YYYY-MM-DD')::date,
+To_date(DOR, 'YYYY-MM-DD')::date,
+DESIGNATION::VARCHAR
+from 
+company_stream
+where metadata$action = 'INSERT';`
+
+var sql_select_stream=snowflake.createStatement({sqlText:stream_select_cmd});
+var stream_select_results=sql_select_stream.execute();
+return 'Done';
+$$;
+
+call company_pro();
+
+show parameters;
+
+select * from "ESWAR"."DATALOADS"."COMPANY";
+select system$stream_has_data('company_stream');
+);
